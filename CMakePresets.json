@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "configurePresets": [
+    {
+      "name": "linux-release",
+      "displayName": "Linux release (real DSP and PipeWire)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INSTALL_PREFIX": "/usr",
+        "FXSOUND_STUB_DSP": "OFF",
+        "FXSOUND_STUB_AUDIO": "OFF",
+        "FXSOUND_SANITIZER": "none"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release",
+      "jobs": 2
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-unit",
+      "configurePreset": "linux-release",
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

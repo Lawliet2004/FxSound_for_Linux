@@ -1,0 +1,39 @@
+name: Linux build and tests
+on:
+  push:
+    branches: [main]
+    tags: ['v*-linux.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+            libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev \
+            libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev libasound2-dev \
+            libglib2.0-dev libpipewire-0.3-dev libxcb1-dev libxcb-keysyms1-dev \
+            python3 python3-gi dbus-daemon
+      - name: Configure and build
+        run: |
+          cmake --preset linux-release
+          cmake --build --preset linux-release
+      - name: Verify fonts and tests
+        run: |
+          sha256sum -c packaging/font-sha256.txt
+          ctest --preset linux-unit
+      - name: Build DEB
+        run: cpack --config build-release/CPackConfig.cmake -G DEB -B dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-ubuntu24.04
+          path: dist/*.deb

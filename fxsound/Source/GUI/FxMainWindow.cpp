@@ -1,0 +1,625 @@
+/*
+FxSound
+Copyright (C) 2025  FxSound LLC
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include <JuceHeader.h>
+#include "FxMainWindow.h"
+#include "FxController.h"
+#include "FxSettingsDialog.h"
+#include "FxPresetExportDialog.h"
+#include "FxPresetImportDialog.h"
+#include "FxPresetNameEditor.h"
+
+class FxPresetMenuItem : public PopupMenu::CustomComponent, private TextEditor::Listener
+{
+public:
+	enum class Status { Empty = 0, Valid, Invalid };
+	enum class Action { Save = 1, Rename };
+
+	FxPresetMenuItem(Action action) : PopupMenu::CustomComponent(false)
+	{
+		auto& theme = dynamic_cast<FxTheme&>(getLookAndFeel());
+
+		preset_status_ = Status::Empty;
+
+		hint_text_.setName(L"hintLabel");
+		hint_text_.setFont(theme.getNormalFont());
+		hint_text_.setColour(Label::ColourIds::textColourId, Colour(FXCOLOR(HintText)).withAlpha(1.0f));
+		hint_text_.setJustificationType(Justification::centredLeft);
+		addAndMakeVisible(hint_text_);
+
+		if (action == Action::Save)
+		{
+			hint_text_.setText(TRANS("Enter your preset name"), NotificationType::dontSendNotification);
+			preset_editor_.setDescription(TRANS("Enter your preset name"));
+		}
+		else
+		{
+			hint_text_.setText(TRANS("Enter new preset name"), NotificationType::dontSendNotification);
+			preset_editor_.setDescription(TRANS("Enter new preset name"));
+		}
+		preset_editor_.setName(L"presetName");
+		preset_editor_.setFont(theme.getNormalFont());
+		preset_editor_.setColour(TextEditor::ColourIds::backgroundColourId, Colour(FXCOLOR(DefaultFill)).withAlpha(0.0f));
+		preset_editor_.setInputRestrictions(64);
+		preset_editor_.setInputFilter(&preset_name_input_filter_, false);
+		preset_editor_.addListener(this);
+		addAndMakeVisible(preset_editor_);
+
+		preset_editor_.onEscapeKey = [this]() {
+			preset_status_ = Status::Empty;
+			triggerMenuItem();
+		};
+
+		preset_editor_.onReturnKey = [this, action]() {
+			if (preset_status_ == Status::Valid)
+			{
+				if (action == Action::Save)
+				{
+					FxController::getInstance().savePreset(preset_name_);
+					triggerMenuItem();
+				}
+				else
+				{
+					FxController::getInstance().renamePreset(preset_name_);
+					triggerMenuItem();
+				}
+			}
+		};
+	}
+	~FxPresetMenuItem() = default;
+
+	Status getStatus() { return preset_status_; }
+	String getPresetName() { return preset_name_; }
+
+	void getIdealSize(int& ideal_width, int& ideal_height)
+	{
+		ideal_width = WIDTH;
+		ideal_height = HEIGHT;
+	}
+
+private:
+	static constexpr int WIDTH = 200;
+	static constexpr int HEIGHT = 30;
+
+	void resized() override
+	{
+		auto bounds = getLocalBounds().reduced(2, 2);
+
+		hint_text_.setBounds(bounds);
+		preset_editor_.setBounds(bounds);
+	}
+
+	void paint(Graphics& g) override
+	{
+		auto bounds = getLocalBounds();
+		Colour outline_colour;
+
+		switch (preset_status_)
+		{
+		case Status::Valid:
+			outline_colour = Colour(FXCOLOR(ValidTextBorder)).withAlpha(1.0f);
+			break;
+
+		case Status::Empty:
+		case Status::Invalid:
+			outline_colour = Colour(FXCOLOR(InvalidTextBorder)).withAlpha(1.0f);
+		}
+
+		g.setColour(findColour(TextEditor::backgroundColourId));
+		g.fillRect(bounds.toFloat());
+
+		g.setColour(outline_colour);
+		g.drawRect(bounds.toFloat().reduced(0.5f, 0.5f), 2.0f);
+
+		preset_editor_.grabKeyboardFocus();
+	}
+
+	void textEditorTextChanged(TextEditor& textEditor) override
+	{
+		auto prevStatus = preset_status_;
+
+		preset_name_ = textEditor.getText();
+		if (preset_name_.isEmpty())
+		{
+			preset_status_ = Status::Empty;
+			hint_text_.setAlpha(1.0);
+		}
+		else
+		{
+			hint_text_.setAlpha(0.0);
+
+			preset_status_ = Status::Valid;
+			auto& model = FxModel::getModel();
+			for (auto i = 0; i < model.getPresetCount(); i++)
+			{
+				if (model.getPreset(i).name.equalsIgnoreCase(preset_name_))
+				{
+					preset_status_ = Status::Invalid;
+					break;
+				}
+			}
+		}
+
+		if (prevStatus != preset_status_)
+		{
+			sendLookAndFeelChange();
+		}
+	}
+
+	void lookAndFeelChanged() override
+	{
+		repaint();
+	}
+
+	TextEditor preset_editor_;
+	PresetNameInputFilter preset_name_input_filter_;
+	Label hint_text_;
+	Status preset_status_;
+	String preset_name_;
+
+	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FxPresetMenuItem)
+};
+
+//==============================================================================
+FxMainWindow::FxMainWindow() : power_button_(L"powerButton"), menu_button_(L"menuButton", DrawableButton::ButtonStyle::ImageFitted), resize_button_(L"resizeButton", DrawableButton::ButtonStyle::ImageFitted), donate_button_(L"donateButton", DrawableButton::ButtonStyle::ImageFitted), minimize_button_(L"minimizeButton", DrawableButton::ButtonStyle::ImageFitted)
+{
+	setName("FxSound");
+	setOpaque(false);
+    enableShadow(false);
+
+	setWantsKeyboardFocus(true);
+
+	FxModel::getModel().addListener(this);
+
+	power_button_.setPowerState(FxModel::getModel().getPowerState());
+
+	power_button_.setMouseCursor(MouseCursor::PointingHandCursor);
+	power_button_.setSize(BUTTON_WIDTH, BUTTON_WIDTH);
+	power_button_.setImageWidth(BUTTON_WIDTH);
+	power_button_.setHelpText(TRANS("Power Button"));
+	power_button_.setWantsKeyboardFocus(true);
+	power_button_.addListener(this);
+
+	menu_button_.setMouseCursor(MouseCursor::PointingHandCursor);
+	menu_button_.setSize(BUTTON_WIDTH, BUTTON_WIDTH);
+	menu_button_.setHelpText(TRANS("Menu Button"));;
+	menu_button_.setWantsKeyboardFocus(true);
+	menu_button_.addListener(this);
+
+	resize_button_.setMouseCursor(MouseCursor::PointingHandCursor);	
+	resize_button_.setHelpText(TRANS("Resize Button"));
+	resize_button_.setWantsKeyboardFocus(true);
+	resize_button_.addListener(this);	
+
+	donate_button_.setMouseCursor(MouseCursor::PointingHandCursor);
+	donate_button_.setSize(BUTTON_WIDTH + 2, BUTTON_WIDTH + 6);
+	donate_button_.setHelpText(TRANS("Donate"));
+	donate_button_.setTooltip(TRANS("Donate"));
+	donate_button_.setWantsKeyboardFocus(true);
+	donate_button_.onClick = [this]() {
+		URL url("https://www.paypal.com/donate/?hosted_button_id=JVNQGYXCQ2GPG");
+		url.launchInDefaultBrowser();
+	};
+
+	minimize_button_.setMouseCursor(MouseCursor::PointingHandCursor);
+	minimize_button_.setSize(BUTTON_WIDTH + 2, BUTTON_WIDTH + 6);
+	minimize_button_.setHelpText(TRANS("Minimize Button"));
+	minimize_button_.setWantsKeyboardFocus(true);
+	minimize_button_.addListener(this);
+
+	help_bubble_.addToDesktop(0);
+	help_bubble_.setAlwaysOnTop(true);
+
+	setLookAndFeel();
+
+	addToolbarButton(&menu_button_, false);
+	addToolbarButton(&minimize_button_);
+	addToolbarButton(&resize_button_);
+	addToolbarButton(&power_button_);
+	addToolbarButton(&donate_button_);
+}
+
+FxMainWindow::~FxMainWindow()
+{
+}
+
+void FxMainWindow::show()
+{
+	if (!isVisible())
+	{
+		setVisible(true);
+	}
+
+	addToDesktop(ComponentPeer::windowAppearsOnTaskbar);
+	toFront(true);
+
+	// Bring window to the top
+	auto* peer = getPeer();
+	if (peer)
+	{
+#ifdef _WIN32
+		HWND hwnd = (HWND)peer->getNativeHandle();
+		if (IsIconic(hwnd)) // If minimized, restore first
+			ShowWindow(hwnd, SW_RESTORE);
+
+		SetForegroundWindow(hwnd); // Bring to front
+		SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+#else
+		peer->toFront(true);
+#endif
+	}
+}
+
+void FxMainWindow::showLiteView()
+{
+	setContent(&lite_view_);
+    setResizeImage();
+	setAlwaysOnTop(FxController::getInstance().isAlwaysOnTop());
+
+	auto bounds = getBounds();
+	auto pos = FxController::getInstance().getSystemTrayWindowPosition(bounds.getWidth(), bounds.getHeight());
+	bounds.setPosition(pos);
+	setBounds(bounds);
+}
+
+void FxMainWindow::showProView()
+{
+    pro_view_.update();
+	setContent(&pro_view_);
+    setResizeImage();
+	setAlwaysOnTop(FxController::getInstance().isAlwaysOnTop());
+	
+	int x = 0;
+	int y = 0;
+
+	auto bounds = getBounds();
+	auto desktop_bounds = Desktop::getInstance().getDisplays().getTotalBounds(true);
+
+	FxController::getInstance().getWindowPosition(x, y);
+	if (x == 0 && y == 0)
+	{
+		centreWithSize(getWidth(), getHeight());		
+	}
+	else 
+	{
+		bounds.setPosition(Point<int>(x, y));
+		if (desktop_bounds.contains(bounds))
+		{
+			setBounds(bounds);
+		}
+		else
+		{
+			centreWithSize(getWidth(), getHeight());
+		}
+	}	
+}
+
+void FxMainWindow::startVisualizer()
+{
+    pro_view_.startVisualizer();
+}
+
+void FxMainWindow::pauseVisualizer()
+{
+    pro_view_.pauseVisualizer();
+}
+
+void FxMainWindow::setLookAndFeel()
+{
+	auto& theme = dynamic_cast<FxTheme&>(LookAndFeel::getDefaultLookAndFeel());
+
+	menu_image_ = Drawable::createFromImageData(FXIMAGE(MenuButton), FXIMAGESIZE(MenuButton));
+	menu_hover_image_ = Drawable::createFromImageData(FXIMAGE(MenuButtonHover), FXIMAGESIZE(MenuButtonHover));
+	menu_button_.setImages(menu_image_.get(), menu_hover_image_.get());
+
+	donate_image_ = Drawable::createFromImageData(FXIMAGE(DonateButton), FXIMAGESIZE(DonateButton));
+	donate_hover_image_ = Drawable::createFromImageData(FXIMAGE(DonateButtonHover), FXIMAGESIZE(DonateButtonHover));
+	donate_button_.setImages(donate_image_.get(), donate_hover_image_.get());
+
+	minimize_image_ = Drawable::createFromImageData(FXIMAGE(MinimizeWindowButton), FXIMAGESIZE(MinimizeWindowButton));
+	minimize_hover_image_ = Drawable::createFromImageData(FXIMAGE(MinimizeWindowButtonHover), FXIMAGESIZE(MinimizeWindowButtonHover));
+	minimize_button_.setImages(minimize_image_.get(), minimize_hover_image_.get());
+
+	help_bubble_.setColour(BubbleComponent::ColourIds::backgroundColourId, Colour(FXCOLOR(DefaultFill)).withAlpha(1.0f));
+	help_bubble_.setColour(BubbleComponent::ColourIds::outlineColourId, theme.findColour(TextEditor::textColourId));
+
+	setResizeImage();
+}
+
+void FxMainWindow::setResizeImage()
+{
+	if (FxController::getInstance().getCurrentView() == ViewType::Pro)
+	{
+		resize_image_ = Drawable::createFromImageData(FXIMAGE(MinimizeButton), FXIMAGESIZE(MinimizeButton));
+		resize_hover_image_ = Drawable::createFromImageData(FXIMAGE(MinimizeButtonHover), FXIMAGESIZE(MinimizeButtonHover));
+		resize_button_.setSize(BUTTON_WIDTH+2, BUTTON_WIDTH+2);
+	}
+	else
+	{
+		resize_image_ = Drawable::createFromImageData(FXIMAGE(MaximizeButton), FXIMAGESIZE(MaximizeButton));
+		resize_hover_image_ = Drawable::createFromImageData(FXIMAGE(MaximizeButtonHover), FXIMAGESIZE(MaximizeButtonHover));
+		resize_button_.setSize(BUTTON_WIDTH, BUTTON_WIDTH); 	
+	}
+
+	resize_button_.setImages(resize_image_.get(), resize_hover_image_.get());
+}
+
+void FxMainWindow::setIcon(bool power, bool processing)
+{
+#ifdef _WIN32
+	HINSTANCE hInst = GetModuleHandle(NULL);
+	HWND hWnd = (HWND)getWindowHandle();
+
+	HICON curr_icon = (HICON)SendMessage(hWnd, WM_GETICON, ICON_SMALL, 0);
+	HICON icon = NULL;
+
+	if (power)
+	{
+		if (processing)
+		{
+			if (FxTheme::getThemeMode() == FxThemeMode::Dark)
+				icon = LoadIcon(hInst, L"IDI_LOGO_RED");
+			else
+				icon = LoadIcon(hInst, L"IDI_LOGO_BLUE");
+		}
+		else
+		{
+			icon = LoadIcon(hInst, L"IDI_LOGO_WHITE");
+		}
+	}
+	else
+	{
+		icon = LoadIcon(hInst, L"IDI_LOGO_GRAY");
+	}
+
+	if (icon != NULL)
+	{
+		SendMessage(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)icon);
+	}
+
+	if (curr_icon != NULL)
+	{
+		DestroyIcon(curr_icon);
+	}
+#else
+	ignoreUnused(power, processing);
+#endif
+}
+
+bool FxMainWindow::keyPressed(const KeyPress& key)
+{
+	if (key.getModifiers().isAltDown() && key.getKeyCode() == juce::KeyPress::returnKey)
+	{
+		FxController::getInstance().setMenuClicked(true);
+		showMenu();
+		return true;
+	}
+
+	return Component::keyPressed(key);
+}
+
+void FxMainWindow::visibilityChanged()
+{
+	auto* peer = getPeer();
+	if (peer)
+	{
+#ifdef _WIN32
+		HWND hwnd = (HWND)peer->getNativeHandle();
+		LONG style = GetWindowLong(hwnd, GWL_STYLE);
+		if ((style & WS_MINIMIZEBOX) == 0)
+		{
+			SetWindowLong(hwnd, GWL_STYLE, style | WS_MINIMIZEBOX);
+		}
+#endif
+	}
+}
+
+void FxMainWindow::showMenu()
+{
+	auto settingsClicked = [this]() {
+
+		FxSettingsDialog settings_dialog;
+		settings_dialog.runModalLoop();
+	};
+
+	auto overwriteClicked = [this]() {
+		FxController::getInstance().savePreset();
+	};
+
+	auto undoClicked = []() {
+		FxController::getInstance().undoPreset();
+	};
+
+	auto deleteClicked = []() {
+		FxController::getInstance().deletePreset();
+	};
+
+	auto exportClicked = [this]() {
+		FxPresetExportDialog preset_export_dialog;
+		preset_export_dialog.runModalLoop();
+	};
+
+	auto importClicked = [this]() {
+		FxPresetImportDialog preset_import_dialog;
+		preset_import_dialog.runModalLoop();
+	};
+
+	auto downloadClicked = []() {
+		URL url("https://www.fxsound.com/presets");
+		url.launchInDefaultBrowser();
+	};
+
+	auto checkForUpdatesClicked = []() {
+#ifdef _WIN32
+		ChildProcess child_process;
+		child_process.start("updater.exe /checknow");
+#endif
+	};
+
+	auto donateClicked = []() {
+		URL url("https://www.paypal.com/donate/?hosted_button_id=JVNQGYXCQ2GPG");
+		url.launchInDefaultBrowser();
+	};
+
+	auto darkModeClicked = [this]() {
+		FxController::getInstance().setThemeMode(FxThemeMode::Dark);
+	};
+
+	auto lightModeClicked = [this]() {
+		FxController::getInstance().setThemeMode(FxThemeMode::Light);
+	};
+
+	auto alwaysOnTopClicked = [this]() {
+		auto& controller = FxController::getInstance();
+		controller.setAlwaysOnTop(!controller.isAlwaysOnTop());
+		};
+
+	PopupMenu popup_menu;
+	PopupMenu save_menu;
+	PopupMenu rename_menu;
+	PopupMenu theme_menu;
+
+	save_menu.addCustomItem(1, std::make_unique<FxPresetMenuItem>(FxPresetMenuItem::Action::Save), nullptr);
+	rename_menu.addCustomItem(2, std::make_unique<FxPresetMenuItem>(FxPresetMenuItem::Action::Rename), nullptr);
+
+	theme_menu.addItem(TRANS("Dark"), true, FxTheme::getThemeMode() == FxThemeMode::Dark, darkModeClicked);
+	theme_menu.addItem(TRANS("Light"), true, FxTheme::getThemeMode() == FxThemeMode::Light, lightModeClicked);
+
+	popup_menu.addItem(TRANS("Settings"), settingsClicked);
+	popup_menu.addSeparator();
+
+	bool user_preset = false;
+	String overwrite_menu_name = TRANS("Overwrite Existing Preset");
+
+	auto& model = FxModel::getModel();
+	auto preset = model.getPreset(model.getSelectedPreset());
+	if (preset.type == FxModel::PresetType::UserPreset)
+	{
+		user_preset = true;
+	}
+	if (model.isPresetModified() && user_preset)
+	{
+		overwrite_menu_name = overwrite_menu_name + L" - " + preset.name;
+	}
+
+	auto power_state = model.getPowerState();
+	popup_menu.addSubMenu(TRANS("Save New Preset"), save_menu, model.isPresetModified() && model.getUserPresetCount() < FxController::getInstance().getMaxUserPresets() && power_state);
+	popup_menu.addItem(overwrite_menu_name, model.isPresetModified() && user_preset && power_state, false, overwriteClicked);
+	popup_menu.addItem(TRANS("Undo Preset Changes"), model.isPresetModified() && power_state, false, undoClicked);
+	popup_menu.addSubMenu(TRANS("Rename Preset"), rename_menu, !model.isPresetModified() && user_preset && power_state);
+	popup_menu.addItem(TRANS("Delete Preset"), !model.isPresetModified() && user_preset && power_state, false, deleteClicked);
+	popup_menu.addSeparator();
+	popup_menu.addItem(TRANS("Export Presets"), !model.isPresetModified() && power_state, false, exportClicked);
+	popup_menu.addItem(TRANS("Import Presets"), !model.isPresetModified() && power_state, false, importClicked);
+	popup_menu.addSeparator();
+	popup_menu.addItem(TRANS("Download Bonus Presets"), downloadClicked);
+	popup_menu.addSeparator();
+	popup_menu.addItem(TRANS("Check for updates"), checkForUpdatesClicked);
+	popup_menu.addSeparator();
+	popup_menu.addSubMenu(TRANS("Theme"), theme_menu);
+	popup_menu.addItem(TRANS("Always On Top"), true, isAlwaysOnTop(), alwaysOnTopClicked);
+	popup_menu.addSeparator();
+	popup_menu.addItem(TRANS("Donate"), donateClicked);
+
+	popup_menu.showAt(&menu_button_);
+}
+
+void FxMainWindow::buttonClicked(Button* button)
+{
+	if (button == &power_button_)
+	{
+		auto power_state = !FxModel::getModel().getPowerState();
+
+		FxController::getInstance().setPowerState(power_state);
+
+		power_button_.setPowerState(FxModel::getModel().getPowerState());
+
+		repaint();
+	}
+	else if (button == &menu_button_)
+	{
+		FxController::getInstance().setMenuClicked(true);
+		showMenu();
+	}
+	else if (button == &resize_button_)
+	{
+		FxController::getInstance().switchView();
+		setResizeImage();
+	}
+	else if (button == &minimize_button_)
+	{
+		if (isOnDesktop())
+		{
+#ifdef _WIN32
+			ShowWindow((HWND)getWindowHandle(), SW_MINIMIZE);
+#else
+			if (auto* peer = getPeer()) peer->setMinimised(true);
+#endif
+		}
+	}
+}
+
+void FxMainWindow::mouseEnter(const MouseEvent&)
+{
+	if (menu_button_.isMouseOver(true) && !FxModel::getModel().isMenuClicked())
+	{
+		auto& theme = dynamic_cast<FxTheme&>(getLookAndFeel());
+
+		AttributedString text(TRANS("Click here to save new presets, overwrite old ones, or reset your settings."));
+		text.setColour(theme.findColour(TextEditor::textColourId));
+		text.setJustification(Justification::centred);
+		text.setFont(theme.getSmallFont());
+
+		help_bubble_.showAt(&menu_button_, text, 0, true, false);
+	}
+}
+
+void FxMainWindow::modelChanged(FxModel::Event)
+{
+	power_button_.setPowerState(FxModel::getModel().getPowerState());
+}
+
+void FxMainWindow::userTriedToCloseWindow()
+{
+	FxController::getInstance().hideMainWindow();
+}
+
+void FxMainWindow::closeButtonPressed()
+{
+	FxController::getInstance().hideMainWindow();
+}
+
+void FxMainWindow::moved()
+{
+	if (FxController::getInstance().getCurrentView() == ViewType::Pro)
+	{
+		auto bounds = getBounds();
+		auto desktop_bounds = Desktop::getInstance().getDisplays().getTotalBounds(true);
+		if (desktop_bounds.contains(bounds))
+		{
+			// Save window position only if the whole window is visible on the desktop
+			FxController::getInstance().saveWindowPosition(bounds.getX(), bounds.getY());
+		}		
+	}
+}
+
+void FxMainWindow::lookAndFeelChanged()
+{
+	setLookAndFeel();
+	repaint();
+}

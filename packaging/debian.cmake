@@ -1,0 +1,17 @@
+# Native Debian package. dpkg-shlibdeps derives ABI minimums from the actual
+# binary rather than assuming the build host's libraries work on older releases.
+set(CPACK_GENERATOR DEB)
+set(CPACK_PACKAGE_NAME fxsound)
+set(CPACK_PACKAGE_VENDOR "Lawliet2004 (unofficial FxSound Linux community port)")
+set(CPACK_PACKAGE_CONTACT "https://github.com/Lawliet2004/FxSound_for_Linux/issues")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}+linux1")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "FxSound audio enhancer and equalizer for PipeWire")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/Lawliet2004/FxSound_for_Linux")
+set(CPACK_RESOURCE_FILE_LICENSE "${FX_ROOT}/LICENSE")
+set(CPACK_PACKAGING_INSTALL_PREFIX /usr)
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+set(CPACK_DEBIAN_PACKAGE_SECTION sound)
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "pipewire, wireplumber")
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "pipewire-pulse")
+include(CPack)

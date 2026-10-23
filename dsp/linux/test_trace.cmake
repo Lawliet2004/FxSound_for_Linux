@@ -1,0 +1,18 @@
+if(NOT DEFINED WORK OR NOT DEFINED SERIAL OR NOT DEFINED REALTIME)
+    message(FATAL_ERROR "Missing trace test paths")
+endif()
+file(REMOVE_RECURSE "${WORK}")
+file(MAKE_DIRECTORY "${WORK}")
+execute_process(COMMAND "${CMAKE_COMMAND}" -E env "XDG_CONFIG_HOME=${WORK}/serial-config"
+    "${SERIAL}" "${WORK}/serial.f32" RESULT_VARIABLE serial_result)
+execute_process(COMMAND "${CMAKE_COMMAND}" -E env "XDG_CONFIG_HOME=${WORK}/realtime-config"
+    "${REALTIME}" "${WORK}/realtime.f32" RESULT_VARIABLE realtime_result)
+if(NOT serial_result EQUAL 0 OR NOT realtime_result EQUAL 0)
+    message(FATAL_ERROR "DSP trace failed: serial=${serial_result}, realtime=${realtime_result}")
+endif()
+file(SHA256 "${WORK}/serial.f32" serial_hash)
+file(SHA256 "${WORK}/realtime.f32" realtime_hash)
+if(NOT serial_hash STREQUAL realtime_hash)
+    message(FATAL_ERROR "DSP samples differ: serial=${serial_hash}, realtime=${realtime_hash}")
+endif()
+message(STATUS "262144 output samples match the original serial engine exactly: ${serial_hash}")
