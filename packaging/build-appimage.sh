@@ -32,8 +32,11 @@ done
 APPDIR="$BUILD_DIR/AppDir"
 VERSION="$(grep -m1 'project(FxSound VERSION' "$REPO_ROOT/CMakeLists.txt" \
            | grep -oP '\d+\.\d+\.\d+\.\d+')"
+LINUX_REVISION="$(sed -n 's/^set(FXSOUND_LINUX_REVISION \([0-9][0-9]*\)).*/\1/p' "$REPO_ROOT/CMakeLists.txt")"
+VERSION="$VERSION-linux.$LINUX_REVISION"
 ARCH="$(uname -m)"
 APPIMAGE_OUT="$OUTPUT_DIR/FxSound-$VERSION-$ARCH.AppImage"
+mkdir -p "$OUTPUT_DIR"
 TOOLS_DIR=/tmp/appimage-tools
 
 # ── helpers ───────────────────────────────────────────────────────────────────

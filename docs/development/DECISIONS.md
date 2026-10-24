@@ -47,3 +47,15 @@ WirePlumber switches to FxSound it briefly publishes another sink as
 is "FxSound"; with the flag off the processor captured pre-volume audio and the
 keys did nothing. The volume now applies before the DSP (as in EasyEffects), so
 effects see a quieter signal at low volume.
+
+**DEC-8 — Tray state belongs to its GLib context.** Public updates enter a
+mutex-protected work queue; bounded dispatch batches allow D-Bus and shutdown
+to progress. Only registration status is read outside the context, atomically.
+An attached priority stop source survives a request made before loop startup.
+StatusNotifierWatcher ownership changes trigger cancellable async registration.
+
+**DEC-9 — Journal default ownership before claiming it.** Persist the exact
+configured default (including absence) atomically in XDG state, scoped to the
+PipeWire endpoint. Reuse it only when the current configured default is still
+FxSound; later user choices supersede it. Do not claim a default if recovery
+state cannot be saved. Confirm restoration before deleting the journal.

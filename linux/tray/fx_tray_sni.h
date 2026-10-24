@@ -58,7 +58,7 @@ public:
     // True if the SNI was successfully registered with a watcher.
     bool isActive() const;
 
-    // Push a new menu tree; thread-safe, signals LayoutUpdated to the host.
+    // Queue a new menu tree on the D-Bus context, then signal LayoutUpdated.
     void updateMenu(MenuItem root);
 
     // Update the SNI Title property (shown as tooltip by many panel implementations).

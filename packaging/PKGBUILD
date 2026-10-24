@@ -1,7 +1,7 @@
 # Maintainer: Lawliet2004 (unofficial community port)
 pkgname=fxsound
 pkgver=1.2.8.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Real-time audio enhancer and equalizer (Linux/PipeWire port)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Lawliet2004/FxSound_for_Linux"

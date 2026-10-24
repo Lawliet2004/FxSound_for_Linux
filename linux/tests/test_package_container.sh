@@ -7,7 +7,8 @@ apt-get update -qq
 if ! command -v xvfb-run >/dev/null || ! command -v pactl >/dev/null || ! command -v xwininfo >/dev/null || ! command -v busctl >/dev/null; then
     apt-get install -y --no-install-recommends python3 xvfb xauth x11-utils dbus-x11 libglib2.0-bin procps systemd pipewire-bin pipewire-pulse pulseaudio-utils wireplumber
 fi
-bash /work/packaging/install.sh --yes /work/dist/fxsound_1.2.8.0+linux1_amd64.deb
+package_path="${1:?Pass the release DEB path inside the container}"
+bash /work/packaging/install.sh --yes "$package_path"
 cat /etc/os-release
 ldd /usr/bin/fxsound
 if ldd /usr/bin/fxsound | grep -q 'not found'; then exit 1; fi

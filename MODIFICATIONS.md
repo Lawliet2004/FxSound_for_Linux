@@ -1,4 +1,4 @@
-# Modified distribution notice — 2026-10-23
+# Modified distribution notice — 2026-10-24
 
 This is a modified community distribution of FxSound, not the original Windows
 release. Original license/copyright headers remain applicable. Local Linux
@@ -10,6 +10,8 @@ Changes relative to the Linux upstream checkpoint in CREDITS.md include:
 - PipeWire graph reconciliation, service-recovery and default restoration.
 - UTF-8 settings/path handling and XDG configuration isolation.
 - Desktop autostart, duplicate activation and uninstall cleanup.
+- Serialized tray properties, reliable early shutdown and desktop-host recovery.
+- Durable per-server output-default recovery across crashes and relaunches.
 - Native Wayland GlobalShortcuts portal sessions and application registration.
 - Real-time, sanitizer, graph, desktop-client and packaging regression fixtures.
 - CMake presets, DEB/AppImage/source packaging and release verification.

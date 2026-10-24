@@ -6,6 +6,8 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(FxSound VERSION 1.2.8.0 LANGUAGES C CXX)
+set(FXSOUND_LINUX_REVISION 2)
+set(FXSOUND_LINUX_VERSION "${PROJECT_VERSION}-linux.${FXSOUND_LINUX_REVISION}")
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "This CMake build is Linux-only. Use the VS solutions on Windows.")
@@ -129,6 +131,7 @@ target_compile_definitions(FxSound PRIVATE
     LINUX=1
     JUCE_APP_VERSION=1.2.8.0
     JUCE_APP_VERSION_HEX=0x1020800
+    FXSOUND_LINUX_VERSION="${FXSOUND_LINUX_VERSION}"
     JUCER_LINUX_MAKE=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
@@ -240,7 +243,7 @@ add_test(NAME desktop_client_audio
 set_tests_properties(desktop_client_audio PROPERTIES LABELS desktop-clients RUN_SERIAL TRUE SKIP_RETURN_CODE 77 TIMEOUT 180)
 add_test(NAME appimage_login_gui
     COMMAND bash ${FX_ROOT}/linux/tests/test_login_gui.sh
-        ${FX_ROOT}/dist/FxSound-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR}.AppImage $<TARGET_FILE:autostart_probe>)
+        ${FX_ROOT}/dist/FxSound-${FXSOUND_LINUX_VERSION}-${CMAKE_SYSTEM_PROCESSOR}.AppImage $<TARGET_FILE:autostart_probe>)
 set_tests_properties(appimage_login_gui PROPERTIES LABELS appimage-login RUN_SERIAL TRUE SKIP_RETURN_CODE 77 TIMEOUT 60)
 add_test(NAME private_cleanup_scope COMMAND python3 ${FX_ROOT}/linux/tests/test_cleanup_scoping.py)
 set_tests_properties(private_cleanup_scope PROPERTIES LABELS unit TIMEOUT 10)
@@ -256,5 +259,21 @@ target_include_directories(wfopen_selftest PRIVATE dsp/linux)
 target_compile_options(wfopen_selftest PRIVATE -UNDEBUG)
 add_test(NAME wfopen_utf8 COMMAND wfopen_selftest)
 set_tests_properties(wfopen_utf8 PROPERTIES LABELS unit TIMEOUT 10)
+
+add_executable(tray_probe linux/tests/test_tray_probe.cpp linux/tray/fx_tray_sni.cpp)
+target_include_directories(tray_probe PRIVATE linux/tray ${GIO_INCLUDE_DIRS})
+target_link_libraries(tray_probe PRIVATE ${GIO_LIBRARIES} Threads::Threads)
+add_test(NAME tray_lifecycle COMMAND dbus-run-session -- /usr/bin/python3
+    ${FX_ROOT}/linux/tests/test_tray_lifecycle.py $<TARGET_FILE:tray_probe>)
+set_tests_properties(tray_lifecycle PROPERTIES LABELS unit TIMEOUT 45)
+add_test(NAME crash_default_recovery COMMAND python3
+    ${FX_ROOT}/linux/tests/test_crash_recovery.py $<TARGET_FILE:graph_probe>)
+set_tests_properties(crash_default_recovery PROPERTIES
+    LABELS pw-live RUN_SERIAL TRUE SKIP_RETURN_CODE 77 TIMEOUT 60)
+add_executable(default_recovery_selftest linux/tests/test_default_recovery.cpp)
+target_include_directories(default_recovery_selftest PRIVATE audiopassthru/src/linux)
+target_compile_options(default_recovery_selftest PRIVATE -UNDEBUG)
+add_test(NAME default_recovery_storage COMMAND default_recovery_selftest)
+set_tests_properties(default_recovery_storage PROPERTIES LABELS unit TIMEOUT 10)
 add_test(NAME release_source_notices COMMAND python3 ${FX_ROOT}/packaging/verify-release-source.py)
 set_tests_properties(release_source_notices PROPERTIES LABELS unit TIMEOUT 10)

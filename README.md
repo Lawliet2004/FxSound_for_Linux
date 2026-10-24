@@ -10,22 +10,24 @@ no trademark rights or endorsement are claimed.
 
 Get the x86_64 **AppImage** or **DEB** from
 [Releases](https://github.com/Lawliet2004/FxSound_for_Linux/releases).
-The initial release is a **prerelease**, built on Ubuntu 26.04.1; it requires
+The second Linux release, **v1.2.8.0-linux.2**, fixes launcher/tray races and
+restores the configured output after a crash and relaunch. It remains a
+**prerelease**, built on Ubuntu 26.04.1; it requires
 **glibc 2.43 or newer**, PipeWire and WirePlumber. The AppImage does not make
 this build compatible with older Ubuntu/Kubuntu installations. Windows and
 macOS are unsupported by these Linux packages.
 
 ```bash
-chmod +x FxSound-1.2.8.0-x86_64.AppImage
-./FxSound-1.2.8.0-x86_64.AppImage
+chmod +x FxSound-1.2.8.0-linux.2-x86_64.AppImage
+./FxSound-1.2.8.0-linux.2-x86_64.AppImage
 # If FUSE is unavailable:
-APPIMAGE_EXTRACT_AND_RUN=1 ./FxSound-1.2.8.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./FxSound-1.2.8.0-linux.2-x86_64.AppImage
 ```
 
 Or install the DEB with dependency resolution:
 
 ```bash
-sudo apt install ./fxsound_1.2.8.0+linux1_amd64.deb
+sudo apt install ./fxsound_1.2.8.0+linux2_amd64.deb
 ```
 
 The DEB installs an application-menu launcher. Start FxSound, choose your
@@ -91,6 +93,8 @@ latency, suspend/resume, long playback, full UI/scaling, Windows visual/audio
 parity and some crash-recovery scenarios remain unverified. See
 [release verification](docs/development/PUBLIC_RELEASE.md) and
 [remaining work](docs/development/IMPLEMENTATION_2026-10-23.md).
+The second release's fixes, regression coverage and remaining limits are
+recorded in [Linux release 2](docs/development/RELEASE_2.md).
 
 Report Linux-port problems to [this repository's issues](https://github.com/Lawliet2004/FxSound_for_Linux/issues).
 For the official Windows project, use the upstream links above.

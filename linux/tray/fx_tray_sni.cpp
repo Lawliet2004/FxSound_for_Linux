@@ -14,6 +14,8 @@ Bus name         : org.kde.StatusNotifierItem-<pid>-1
 #include <gio/gio.h>
 #include <glib.h>
 #include <mutex>
+#include <atomic>
+#include <deque>
 #include <thread>
 #include <unistd.h>
 
@@ -222,15 +224,73 @@ struct FxTraySNI::Impl
     uint32_t     revision = 1;
 
     // GLib/DBus
-    GMainContext*    ctx      = nullptr;
-    GMainLoop*       loop     = nullptr;
+    // Created before the worker is published; never replaced while it runs.
+    GMainContext*    ctx      = g_main_context_new();
+    GMainLoop*       loop     = g_main_loop_new(ctx, FALSE);
     std::thread      thread;
     GDBusConnection* conn     = nullptr;
     guint            owner_id = 0;
     guint            sni_reg  = 0;
     guint            menu_reg = 0;
-    bool             active   = false;
+    std::atomic<bool> active{false};
+    guint            watcher_id = 0;
+    GCancellable*    registration_cancel = nullptr;
+    unsigned         generation = 0;
+    unsigned         pending_registrations = 0;
+    bool             stopping = false; // GLib thread only
     std::string      bus_name;
+    std::mutex work_mutex;
+    std::deque<std::function<void()>> work;
+    bool dispatch_scheduled = false; // guarded by work_mutex
+
+    ~Impl() { g_main_loop_unref(loop); g_main_context_unref(ctx); }
+
+    // Attach a source explicitly: invoke() may run inline before the worker
+    // owns the context, which would defeat both serialization and early stop.
+    void post(std::function<void()> task)
+    {
+        std::lock_guard<std::mutex> lock(work_mutex);
+        work.push_back(std::move(task));
+        if (dispatch_scheduled) return;
+        dispatch_scheduled = true;
+        auto* source = g_idle_source_new();
+        g_source_set_priority(source, G_PRIORITY_DEFAULT);
+        g_source_set_callback(source, [](gpointer data) -> gboolean {
+            auto* self = static_cast<Impl*>(data);
+            // A bounded batch leaves room for D-Bus queries and priority stop
+            // requests even while the producer continues publishing updates.
+            for (unsigned i = 0; i < 64; ++i) {
+                std::function<void()> task;
+                {
+                    std::lock_guard<std::mutex> lock(self->work_mutex);
+                    if (self->work.empty()) {
+                        self->dispatch_scheduled = false;
+                        return G_SOURCE_REMOVE;
+                    }
+                    task = std::move(self->work.front());
+                    self->work.pop_front();
+                }
+                if (!self->stopping) task();
+            }
+            return G_SOURCE_CONTINUE;
+        }, this, nullptr);
+        g_source_attach(source, ctx);
+        g_source_unref(source);
+    }
+
+    void requestStop()
+    {
+        auto* source = g_idle_source_new();
+        g_source_set_priority(source, G_PRIORITY_HIGH);
+        g_source_set_callback(source, [](gpointer data) -> gboolean {
+            auto* self = static_cast<Impl*>(data);
+            self->stopping = true;
+            g_main_loop_quit(self->loop);
+            return G_SOURCE_REMOVE;
+        }, this, nullptr);
+        g_source_attach(source, ctx);
+        g_source_unref(source);
+    }
 
     // ---- SNI method handler ------------------------------------------------
     static void sniMethod(GDBusConnection*, const gchar*, const gchar*,
@@ -422,11 +482,54 @@ struct FxTraySNI::Impl
     }
 
     // ---- registration -------------------------------------------------------
+    void cancelRegistration()
+    {
+        if (registration_cancel) {
+            g_cancellable_cancel(registration_cancel);
+            g_clear_object(&registration_cancel);
+        }
+        active = false;
+        ++generation;
+    }
+
+    struct Registration { Impl* owner; unsigned generation; };
+
+    static void hostAppeared(GDBusConnection* connection, const gchar*,
+                             const gchar* owner, gpointer user)
+    {
+        auto* self = static_cast<Impl*>(user);
+        if (self->stopping) return;
+        self->cancelRegistration();
+        self->registration_cancel = g_cancellable_new();
+        ++self->pending_registrations;
+        const char* unique = g_dbus_connection_get_unique_name(connection);
+        g_dbus_connection_call(connection, owner, "/StatusNotifierWatcher",
+            "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem",
+            g_variant_new("(s)", unique ? unique : self->bus_name.c_str()), nullptr,
+            G_DBUS_CALL_FLAGS_NO_AUTO_START, 1500, self->registration_cancel,
+            [](GObject* object, GAsyncResult* result, gpointer data) {
+                std::unique_ptr<Registration> request(static_cast<Registration*>(data));
+                auto* self = request->owner;
+                GError* error = nullptr;
+                auto* reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(object), result, &error);
+                if (!self->stopping && request->generation == self->generation)
+                    self->active = reply != nullptr;
+                if (reply) g_variant_unref(reply);
+                if (error) g_error_free(error);
+                --self->pending_registrations;
+            }, new Registration{self, self->generation});
+    }
+
+    static void hostVanished(GDBusConnection*, const gchar*, gpointer user)
+    {
+        static_cast<Impl*>(user)->cancelRegistration();
+    }
+
     static void onBusAcquired(GDBusConnection* connection,
                               const gchar*, gpointer user)
     {
         auto* self = static_cast<Impl*>(user);
-        self->conn = connection;
+        self->conn = G_DBUS_CONNECTION(g_object_ref(connection));
 
         static const GDBusInterfaceVTable sniVtable = {
             sniMethod, sniProperty, nullptr, { nullptr }
@@ -447,15 +550,10 @@ struct FxTraySNI::Impl
             menu_node->interfaces[0], &menuVtable, self, nullptr, nullptr);
         g_dbus_node_info_unref(menu_node);
 
-        // Register with StatusNotifierWatcher using the connection's unique name.
-        const char* unique = g_dbus_connection_get_unique_name(connection);
-        GVariant* res = g_dbus_connection_call_sync(
-            connection,
-            "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
-            "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem",
-            g_variant_new("(s)", unique ? unique : self->bus_name.c_str()),
-            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
-        if (res) { g_variant_unref(res); self->active = true; }
+        // Desktop startup and panel restarts can happen after this connection.
+        self->watcher_id = g_bus_watch_name_on_connection(connection,
+            "org.kde.StatusNotifierWatcher", G_BUS_NAME_WATCHER_FLAGS_NONE,
+            hostAppeared, hostVanished, self, nullptr);
     }
 
     void emitSNISignal(const char* name, GVariant* params)
@@ -475,9 +573,7 @@ struct FxTraySNI::Impl
 
     void run()
     {
-        ctx  = g_main_context_new();
         g_main_context_push_thread_default(ctx);
-        loop = g_main_loop_new(ctx, FALSE);
 
         bus_name = "org.kde.StatusNotifierItem-" + std::to_string(getpid()) + "-1";
         owner_id = g_bus_own_name(G_BUS_TYPE_SESSION, bus_name.c_str(),
@@ -485,10 +581,17 @@ struct FxTraySNI::Impl
                                   onBusAcquired, nullptr, nullptr, this, nullptr);
         g_main_loop_run(loop);
 
+        stopping = true;
+        if (watcher_id) g_bus_unwatch_name(watcher_id);
+        cancelRegistration();
         if (owner_id) g_bus_unown_name(owner_id);
-        if (loop)     g_main_loop_unref(loop);
+        if (conn && sni_reg) g_dbus_connection_unregister_object(conn, sni_reg);
+        if (conn && menu_reg) g_dbus_connection_unregister_object(conn, menu_reg);
+        // Cancellation completes on this context. Drain our callbacks before
+        // releasing Impl, so pending replies never retain dangling userdata.
+        while (pending_registrations) g_main_context_iteration(ctx, TRUE);
+        g_clear_object(&conn);
         g_main_context_pop_thread_default(ctx);
-        if (ctx) g_main_context_unref(ctx);
     }
 };
 
@@ -502,49 +605,53 @@ FxTraySNI::FxTraySNI(std::function<void()>    on_activate,
 {
     impl_->on_activate       = std::move(on_activate);
     impl_->on_item_activated = std::move(on_item_activated);
-    impl_->thread = std::thread([this] { impl_->run(); });
+    impl_->thread = std::thread([state = impl_.get()] { state->run(); });
 }
 
 FxTraySNI::~FxTraySNI()
 {
-    if (impl_ && impl_->loop)
-        g_main_loop_quit(impl_->loop);
+    if (impl_) impl_->requestStop();
     if (impl_ && impl_->thread.joinable())
         impl_->thread.join();
 }
 
-bool FxTraySNI::isActive() const { return impl_ && impl_->active; }
+bool FxTraySNI::isActive() const { return impl_ && impl_->active.load(); }
 
 void FxTraySNI::updateMenu(MenuItem root)
 {
     if (!impl_) return;
-    {
-        std::lock_guard<std::mutex> lock(impl_->menu_mutex);
-        impl_->root_menu = std::move(root);
-        impl_->revision++;
-    }
-    impl_->emitLayoutUpdated();
+    impl_->post([state = impl_.get(), root = std::move(root)]() mutable {
+        state->root_menu = std::move(root);
+        ++state->revision;
+        state->emitLayoutUpdated();
+    });
 }
 
 void FxTraySNI::setTitle(const std::string& title)
 {
     if (!impl_) return;
-    impl_->title_ = title;
-    impl_->emitSNISignal("NewTitle", nullptr);
+    impl_->post([state = impl_.get(), title] {
+        state->title_ = title;
+        state->emitSNISignal("NewTitle", nullptr);
+    });
 }
 
 void FxTraySNI::setIconName(const std::string& name)
 {
     if (!impl_) return;
-    impl_->icon_name = name;
-    impl_->emitSNISignal("NewIcon", nullptr);
+    impl_->post([state = impl_.get(), name] {
+        state->icon_name = name;
+        state->emitSNISignal("NewIcon", nullptr);
+    });
 }
 
 void FxTraySNI::setIconThemePath(const std::string& path)
 {
     if (!impl_) return;
-    impl_->icon_theme_path = path;
-    impl_->emitSNISignal("NewIcon", nullptr);
+    impl_->post([state = impl_.get(), path] {
+        state->icon_theme_path = path;
+        state->emitSNISignal("NewIcon", nullptr);
+    });
 }
 
 void FxTraySNI::setIconPixmap(int w, int h, std::vector<unsigned char> rgba)
@@ -552,20 +659,23 @@ void FxTraySNI::setIconPixmap(int w, int h, std::vector<unsigned char> rgba)
     if (!impl_) return;
     // SNI IconPixmap expects network-byte-order ARGB (big-endian per pixel).
     // Convert from RGBA to ARGB big-endian.
-    impl_->px_w = w;
-    impl_->px_h = h;
-    impl_->px_argb.clear();
-    impl_->px_argb.reserve(rgba.size());
+    std::vector<unsigned char> argb;
+    argb.reserve(rgba.size());
     for (size_t i = 0; i + 3 < rgba.size(); i += 4)
     {
         unsigned char r = rgba[i], g = rgba[i+1], b = rgba[i+2], a = rgba[i+3];
         // Pack as big-endian 32-bit ARGB: A R G B bytes
-        impl_->px_argb.push_back(a);
-        impl_->px_argb.push_back(r);
-        impl_->px_argb.push_back(g);
-        impl_->px_argb.push_back(b);
+        argb.push_back(a);
+        argb.push_back(r);
+        argb.push_back(g);
+        argb.push_back(b);
     }
-    impl_->emitSNISignal("NewIcon", nullptr);
+    impl_->post([state = impl_.get(), w, h, argb = std::move(argb)]() mutable {
+        state->px_w = w;
+        state->px_h = h;
+        state->px_argb = std::move(argb);
+        state->emitSNISignal("NewIcon", nullptr);
+    });
 }
 
 

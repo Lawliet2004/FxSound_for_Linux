@@ -33,6 +33,7 @@ methods take the loop lock. The realtime process callback is lock-free.
 #include <locale>
 #include <memory>
 #include <mutex>
+#include "DefaultSinkRecovery.h"
 #include <set>
 #include <cstring>
 #include <map>
@@ -101,6 +102,8 @@ struct AudioPassthruPrivate
     bool            captured_default = false;
     bool            default_set = false;
     std::string     configured_sink_name;
+    std::string     configured_sink_json;
+    DefaultSinkRecovery recovery;
 
     float* in_ports[kChannels]  = {nullptr, nullptr};
     float* out_ports[kChannels] = {nullptr, nullptr};
@@ -301,10 +304,25 @@ const pw_filter_events filter_events = {
 };
 
 // ---- default-sink metadata ----------------------------------------------
+std::string sinkNameFromJson(const char* value);
 void setDefaultSinkToFxSound(AudioPassthruPrivate* d)
 {
     if (!d->metadata || !d->metadata_ready || d->sink_node_id == SPA_ID_INVALID || d->default_set || d->stopping) return;
-    if (d->configured_sink_name.empty()) d->prev_default_sink.clear();
+    d->prev_default_sink = d->configured_sink_json;
+    if (d->configured_sink_name == "FxSound") {
+        std::string saved;
+        if (d->recovery.load(saved) &&
+            (saved.empty() || (!sinkNameFromJson(saved.c_str()).empty() && sinkNameFromJson(saved.c_str()) != "FxSound"))) {
+            d->prev_default_sink = saved;
+            if (!saved.empty()) d->default_sink_name = sinkNameFromJson(saved.c_str());
+        }
+    }
+    // Save before claiming the default. If state cannot be persisted, keep
+    // the user's existing routing and let the control timer retry later.
+    if (!d->recovery.save(d->prev_default_sink)) {
+        std::fprintf(stderr, "FxSound: cannot persist default-sink recovery state; leaving the default unchanged\n");
+        return;
+    }
     d->captured_default = true; // An absent configured default is a state too.
     d->default_set = pw_metadata_set_property(d->metadata, 0, "default.configured.audio.sink",
                              "Spa:String:JSON", "{ \"name\": \"FxSound\" }") >= 0;
@@ -336,6 +354,7 @@ int metadata_property(void* data, uint32_t subject, const char* key,
         // Do not mistake the stale cached FxSound value for continued ownership
         // and overwrite this explicit user change during shutdown.
         d->configured_sink_name.clear();
+        d->configured_sink_json.clear();
         d->have_configured_sink = false;
         pw_thread_loop_signal(d->loop, false);
         return 0;
@@ -348,6 +367,7 @@ int metadata_property(void* data, uint32_t subject, const char* key,
     bool configured = spa_streq(key, "default.configured.audio.sink");
     if (configured) {
         d->configured_sink_name = value ? sinkNameFromJson(value) : "";
+        d->configured_sink_json = value ? value : "";
         d->have_configured_sink = !d->configured_sink_name.empty();
         pw_thread_loop_signal(d->loop, false);
     }
@@ -362,16 +382,6 @@ int metadata_property(void* data, uint32_t subject, const char* key,
                 d->default_sink_name = name;
                 if (d->selected_sink_name.empty()) reroute(d);
             }
-        }
-    }
-    // Capture the existing default sink once (before we override it) so we can
-    // restore it on exit. Ignore our own value.
-    if (spa_streq(key, "default.configured.audio.sink") && value && !d->captured_default)
-    {
-        if (sinkNameFromJson(value) != "FxSound")
-        {
-            d->prev_default_sink = value;
-            d->captured_default = true;
         }
     }
     return 0;
@@ -403,7 +413,6 @@ void registry_global(void* data, uint32_t id, uint32_t /*perm*/, const char* typ
         if (mc && spa_streq(mc, "Audio/Sink") && ni.name == "FxSound")
             d->sink_node_id = id;
         reroute(d);
-        setDefaultSinkToFxSound(d);
     } else if (spa_streq(type, PW_TYPE_INTERFACE_Metadata)) {
         const char* mn = spa_dict_lookup(props, "metadata.name");
         if (mn && spa_streq(mn, "default") && !d->metadata) {
@@ -480,9 +489,14 @@ void disconnectGraph(AudioPassthruPrivate* d, bool restore)
         pw_metadata_set_property(d->metadata, 0, "default.configured.audio.sink",
             d->prev_default_sink.empty() ? nullptr : "Spa:String:JSON",
             d->prev_default_sink.empty() ? nullptr : d->prev_default_sink.c_str());
-        roundtrip(d);
-        awaitConfiguredSink(d, d->prev_default_sink.empty() ? "" : sinkNameFromJson(d->prev_default_sink.c_str()));
+        if (roundtrip(d) && awaitConfiguredSink(d,
+                d->prev_default_sink.empty() ? "" : sinkNameFromJson(d->prev_default_sink.c_str())))
+            d->recovery.clear();
     }
+    // A later user choice (including no configured default) takes precedence.
+    // Keep the journal on connection failure so a future process can recover.
+    if (restore && d->default_set && !d->connection_error && d->configured_sink_name != "FxSound")
+        d->recovery.clear();
     d->monitor_links.clear();
     d->links.clear();
     if (d->metadata) { spa_hook_remove(&d->metadata_listener); pw_proxy_destroy((pw_proxy*)d->metadata); }
@@ -529,6 +543,7 @@ int AudioPassthru::init()
     data_->connection_error = false; data_->stopping = false;
     data_->done_seq = -1; data_->default_set = false; data_->captured_default = false;
     data_->configured_sink_name.clear(); data_->have_configured_sink = false;
+    data_->configured_sink_json.clear();
     // PipeWire >= 0.3.49 reference-counts init/deinit. Retain one reference per
     // backend across reconnects and release it only after all loops are gone.
     if (!data_->library_initialized) {
@@ -623,6 +638,7 @@ int AudioPassthru::init()
         data_->metadata_ready = true;
         reroute(data_);
         setDefaultSinkToFxSound(data_);
+        reroute(data_); // A recovered preference can change the target device.
         ready = data_->default_set && roundtrip(data_) && awaitConfiguredSink(data_, "FxSound");
     }
     data_->started = ready;
